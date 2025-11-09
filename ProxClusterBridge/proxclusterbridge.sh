@@ -6,7 +6,17 @@
 # Verbindet Proxmox-Server über verschiedene Standorte sicher via WireGuard VPN
 # Mit automatischen Backups und Rollback-Funktionen
 #
-# Repository: https://github.com/YourUsername/ProxClusterBridge
+# Installation:
+#   curl -fsSL https://raw.githubusercontent.com/Stumpf-works/proxmox-toolkit/main/ProxClusterBridge/proxclusterbridge.sh | bash
+#   # oder
+#   wget -qO- https://raw.githubusercontent.com/Stumpf-works/proxmox-toolkit/main/ProxClusterBridge/proxclusterbridge.sh | bash
+#
+# Oder herunterladen und ausführen:
+#   wget https://raw.githubusercontent.com/Stumpf-works/proxmox-toolkit/main/ProxClusterBridge/proxclusterbridge.sh
+#   chmod +x proxclusterbridge.sh
+#   ./proxclusterbridge.sh
+#
+# Repository: https://github.com/Stumpf-works/proxmox-toolkit
 # Author: Sebastian Stumpf
 # License: MIT
 ################################################################################
@@ -309,16 +319,40 @@ setup_master_node() {
     hostnamectl set-hostname "$HOSTNAME"
     log_success "Hostname gesetzt: $HOSTNAME"
     
+    # Erkenne physisches Interface
+    log_step "Erkenne Netzwerk-Interface..."
+    PHYSICAL_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
+    
+    if [ -z "$PHYSICAL_IF" ]; then
+        log_warning "Konnte Standard-Interface nicht automatisch erkennen"
+        read -p "Gib das physische Interface ein (z.B. enp5s0, vmbr0): " PHYSICAL_IF
+    else
+        log_info "Erkanntes Interface: $PHYSICAL_IF"
+        read -p "Ist das korrekt? (j/n, oder anderes Interface eingeben): " if_confirm
+        if [[ ! $if_confirm =~ ^[jJ]$ ]]; then
+            PHYSICAL_IF=$if_confirm
+        fi
+    fi
+    
+    # Validiere WireGuard IP
+    if [ -z "$WG_IP" ]; then
+        log_error "WireGuard IP ist leer! Bitte erneut eingeben."
+        read -p "WireGuard IP für diesen Server (z.B. 10.99.0.1): " WG_IP
+    fi
+    
+    log_info "Verwende WireGuard IP: $WG_IP"
+    log_info "Verwende Interface: $PHYSICAL_IF"
+    
     # WireGuard Config erstellen
     log_step "Erstelle WireGuard Konfiguration..."
     
     cat > /etc/wireguard/wg0.conf <<EOF
 [Interface]
 PrivateKey = $(cat /etc/wireguard/privatekey)
-Address = $WG_IP/24
+Address = ${WG_IP}/24
 ListenPort = $WG_PORT
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $PHYSICAL_IF -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $PHYSICAL_IF -j MASQUERADE
 
 # Worker-Nodes werden hier hinzugefügt:
 # Beispiel:
@@ -338,13 +372,27 @@ EOF
         log_success "UFW Regel hinzugefügt"
     fi
     
-    # IP Forwarding aktivieren
-    backup_file "/etc/sysctl.conf"
-    if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
-        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    # IP Forwarding prüfen und aktivieren
+    log_step "Prüfe IP Forwarding..."
+    
+    IPV4_FORWARD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
+    
+    if [ "$IPV4_FORWARD" = "1" ]; then
+        log_success "IP Forwarding bereits aktiviert - keine Änderung nötig"
+    else
+        log_info "IP Forwarding wird aktiviert..."
+        backup_file "/etc/sysctl.conf"
+        
+        if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf; then
+            echo "" >> /etc/sysctl.conf
+            echo "# Added by ProxClusterBridge" >> /etc/sysctl.conf
+            echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+            log_info "Zeile zu /etc/sysctl.conf hinzugefügt"
+        fi
+        
+        sysctl -w net.ipv4.ip_forward=1 > /dev/null
+        log_success "IP Forwarding aktiviert"
     fi
-    sysctl -p > /dev/null
-    log_success "IP Forwarding aktiviert"
     
     # WireGuard starten
     log_step "Starte WireGuard..."
@@ -445,15 +493,39 @@ setup_worker_node() {
     hostnamectl set-hostname "$HOSTNAME"
     log_success "Hostname gesetzt: $HOSTNAME"
     
+    # Erkenne physisches Interface
+    log_step "Erkenne Netzwerk-Interface..."
+    PHYSICAL_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
+    
+    if [ -z "$PHYSICAL_IF" ]; then
+        log_warning "Konnte Standard-Interface nicht automatisch erkennen"
+        read -p "Gib das physische Interface ein (z.B. enp5s0, vmbr0): " PHYSICAL_IF
+    else
+        log_info "Erkanntes Interface: $PHYSICAL_IF"
+        read -p "Ist das korrekt? (j/n, oder anderes Interface eingeben): " if_confirm
+        if [[ ! $if_confirm =~ ^[jJ]$ ]]; then
+            PHYSICAL_IF=$if_confirm
+        fi
+    fi
+    
+    # Validiere WireGuard IP
+    if [ -z "$WG_IP" ]; then
+        log_error "WireGuard IP ist leer! Bitte erneut eingeben."
+        read -p "WireGuard IP für diesen Server (z.B. 10.99.0.2): " WG_IP
+    fi
+    
+    log_info "Verwende WireGuard IP: $WG_IP"
+    log_info "Verwende Interface: $PHYSICAL_IF"
+    
     # WireGuard Config erstellen
     log_step "Erstelle WireGuard Konfiguration..."
     
     cat > /etc/wireguard/wg0.conf <<EOF
 [Interface]
 PrivateKey = $(cat /etc/wireguard/privatekey)
-Address = $WG_IP/24
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+Address = ${WG_IP}/24
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $PHYSICAL_IF -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $PHYSICAL_IF -j MASQUERADE
 
 [Peer]
 PublicKey = $MASTER_PUBLIC_KEY
@@ -465,13 +537,27 @@ EOF
     chmod 600 /etc/wireguard/wg0.conf
     log_success "WireGuard Config erstellt"
     
-    # IP Forwarding aktivieren
-    backup_file "/etc/sysctl.conf"
-    if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
-        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    # IP Forwarding prüfen und aktivieren
+    log_step "Prüfe IP Forwarding..."
+    
+    IPV4_FORWARD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
+    
+    if [ "$IPV4_FORWARD" = "1" ]; then
+        log_success "IP Forwarding bereits aktiviert - keine Änderung nötig"
+    else
+        log_info "IP Forwarding wird aktiviert..."
+        backup_file "/etc/sysctl.conf"
+        
+        if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf; then
+            echo "" >> /etc/sysctl.conf
+            echo "# Added by ProxClusterBridge" >> /etc/sysctl.conf
+            echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+            log_info "Zeile zu /etc/sysctl.conf hinzugefügt"
+        fi
+        
+        sysctl -w net.ipv4.ip_forward=1 > /dev/null
+        log_success "IP Forwarding aktiviert"
     fi
-    sysctl -p > /dev/null
-    log_success "IP Forwarding aktiviert"
     
     # WireGuard starten
     log_step "Starte WireGuard..."

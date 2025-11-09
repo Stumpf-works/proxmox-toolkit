@@ -1,832 +1,416 @@
-#!/bin/bash
+# ProxClusterBridge
 
-################################################################################
-# ProxClusterBridge v1.0 - Safe Multi-Site Proxmox Cluster Setup
-# 
-# Verbindet Proxmox-Server über verschiedene Standorte sicher via WireGuard VPN
-# Mit automatischen Backups und Rollback-Funktionen
-#
-# Installation:
-#   curl -fsSL https://raw.githubusercontent.com/Stumpf-works/proxmox-toolkit/main/ProxClusterBridge/proxclusterbridge.sh | bash
-#   # oder
-#   wget -qO- https://raw.githubusercontent.com/Stumpf-works/proxmox-toolkit/main/ProxClusterBridge/proxclusterbridge.sh | bash
-#
-# Oder herunterladen und ausführen:
-#   wget https://raw.githubusercontent.com/Stumpf-works/proxmox-toolkit/main/ProxClusterBridge/proxclusterbridge.sh
-#   chmod +x proxclusterbridge.sh
-#   ./proxclusterbridge.sh
-#
-# Repository: https://github.com/Stumpf-works/proxmox-toolkit
-# Author: Sebastian Stumpf
-# License: MIT
-################################################################################
+> 🔗 Sicheres Multi-Site Proxmox Cluster Setup mit WireGuard VPN
 
-set -e
+ProxClusterBridge verbindet Proxmox-Server über verschiedene Standorte (z.B. Rechenzentrum + Home) sicher in einem Cluster. Mit automatischen Backups, Rollback-Funktionen und interaktivem Setup-Assistenten.
 
-# Farben für Output
-COLOR_RED='\033[0;31m'
-COLOR_GREEN='\033[0;32m'
-COLOR_YELLOW='\033[1;33m'
-COLOR_BLUE='\033[0;34m'
-COLOR_CYAN='\033[0;36m'
-COLOR_RESET='\033[0m'
+---
 
-# Backup-Verzeichnis
-BACKUP_DIR="/root/proxclusterbridge-backup-$(date +%Y%m%d-%H%M%S)"
-ROLLBACK_LOG="$BACKUP_DIR/rollback.log"
+## 🎯 Features
 
-# Log-Funktionen
-log_info() {
-    echo -e "${COLOR_BLUE}[INFO]${COLOR_RESET} $1"
-}
+- ✅ **Safe Mode** - Automatische Backups vor jeder Änderung
+- ✅ **Rollback-Funktion** - Stelle alles mit einem Befehl wieder her
+- ✅ **WireGuard VPN** - Sichere verschlüsselte Verbindung zwischen Standorten
+- ✅ **Interaktiver Assistent** - Führt dich Schritt-für-Schritt durch das Setup
+- ✅ **Pre-Flight Checks** - Prüft System vor Änderungen
+- ✅ **Intelligente Erkennung** - Erkennt bestehende Konfigurationen
+- ✅ **Keine Netzwerk-Änderungen** - Deine Bridge-Konfiguration bleibt unberührt
 
-log_success() {
-    echo -e "${COLOR_GREEN}[✓ SUCCESS]${COLOR_RESET} $1"
-}
+---
 
-log_warning() {
-    echo -e "${COLOR_YELLOW}[⚠ WARNING]${COLOR_RESET} $1"
-}
+## 📋 Voraussetzungen
 
-log_error() {
-    echo -e "${COLOR_RED}[✗ ERROR]${COLOR_RESET} $1"
-}
+- 2x Proxmox VE Server (7.x oder 8.x)
+- Root-Zugriff auf beiden Servern
+- Öffentliche IP auf mindestens einem Server (Master)
+- Offener UDP Port für WireGuard (Standard: 51820)
 
-log_step() {
-    echo -e "${COLOR_CYAN}[STEP]${COLOR_RESET} $1"
-}
+---
 
-# Backup-Funktionen
-create_backup_dir() {
-    if [ ! -d "$BACKUP_DIR" ]; then
-        mkdir -p "$BACKUP_DIR"
-        log_success "Backup-Verzeichnis erstellt: $BACKUP_DIR"
-    fi
-}
+## 🚀 Quick Start
 
-backup_file() {
-    local file="$1"
-    if [ -f "$file" ]; then
-        cp "$file" "$BACKUP_DIR/$(basename $file).backup"
-        log_info "Gesichert: $file"
-        echo "FILE:$file" >> "$ROLLBACK_LOG"
-    fi
-}
+### 1. Script herunterladen
 
-backup_directory() {
-    local dir="$1"
-    if [ -d "$dir" ]; then
-        tar -czf "$BACKUP_DIR/$(basename $dir).tar.gz" "$dir" 2>/dev/null || true
-        log_info "Gesichert: $dir"
-        echo "DIR:$dir" >> "$ROLLBACK_LOG"
-    fi
-}
+```bash
+# Auf beiden Servern ausführen
+cd /root
+wget https://raw.githubusercontent.com/Stumpf-works/proxmox-toolkit/main/ProxClusterBridge/proxclusterbridge.sh
+chmod +x proxclusterbridge.sh
+```
 
-create_full_backup() {
-    log_step "Erstelle Sicherheitskopie..."
-    create_backup_dir
-    
-    # Hostname sichern
-    hostname > "$BACKUP_DIR/hostname.backup"
-    
-    # Netzwerk-Konfiguration
-    backup_file "/etc/network/interfaces"
-    backup_file "/etc/hosts"
-    backup_file "/etc/hostname"
-    
-    # Proxmox-Konfiguration
-    if [ -d "/etc/pve" ]; then
-        backup_directory "/etc/pve"
-    fi
-    
-    # WireGuard (falls vorhanden)
-    if [ -d "/etc/wireguard" ]; then
-        backup_directory "/etc/wireguard"
-    fi
-    
-    # Systemctl Status
-    systemctl list-units --type=service --state=running > "$BACKUP_DIR/services.backup"
-    
-    # Sysctl Settings
-    sysctl -a > "$BACKUP_DIR/sysctl.backup" 2>/dev/null || true
-    
-    log_success "Backup erstellt in: $BACKUP_DIR"
-    echo ""
-    log_warning "Speichere diesen Pfad für einen eventuellen Rollback!"
-    echo ""
-}
+### 2. Master-Server Setup (z.B. Hetzner)
 
-perform_rollback() {
-    log_warning "Starte Rollback-Prozess..."
-    
-    read -p "Backup-Verzeichnis Pfad: " RESTORE_DIR
-    
-    if [ ! -d "$RESTORE_DIR" ]; then
-        log_error "Backup-Verzeichnis nicht gefunden!"
-        return 1
-    fi
-    
-    # Hostname wiederherstellen
-    if [ -f "$RESTORE_DIR/hostname.backup" ]; then
-        hostnamectl set-hostname "$(cat $RESTORE_DIR/hostname.backup)"
-        log_info "Hostname wiederhergestellt"
-    fi
-    
-    # Network interfaces wiederherstellen
-    if [ -f "$RESTORE_DIR/interfaces.backup" ]; then
-        cp "$RESTORE_DIR/interfaces.backup" /etc/network/interfaces
-        log_info "Network interfaces wiederhergestellt"
-    fi
-    
-    # Hosts wiederherstellen
-    if [ -f "$RESTORE_DIR/hosts.backup" ]; then
-        cp "$RESTORE_DIR/hosts.backup" /etc/hosts
-        log_info "Hosts-Datei wiederhergestellt"
-    fi
-    
-    # WireGuard stoppen und entfernen
-    systemctl stop wg-quick@wg0 2>/dev/null || true
-    systemctl disable wg-quick@wg0 2>/dev/null || true
-    rm -f /etc/wireguard/wg0.conf
-    log_info "WireGuard gestoppt"
-    
-    log_success "Rollback abgeschlossen!"
-    log_warning "Bitte Server neu starten: reboot"
-}
+```bash
+sudo ./proxclusterbridge.sh
+# Wähle Option 1 (Vollständiges Setup)
+# Wähle "j" für Master-Node
+```
 
-# Sicherheitsprüfungen
-check_root() {
-    if [ "$EUID" -ne 0 ]; then 
-        log_error "Bitte als root ausführen (sudo ./proxclusterbridge.sh)"
-        exit 1
-    fi
-}
+**Notiere dir diese Informationen:**
+- Master Public Key
+- Master WireGuard IP
+- Master Public IP
 
-check_proxmox() {
-    if ! command -v pvecm &> /dev/null; then
-        log_error "Proxmox VE ist nicht installiert!"
-        exit 1
-    fi
-    log_success "Proxmox VE gefunden: $(pveversion)"
-}
+### 3. Worker-Server Setup (z.B. Home)
 
-check_existing_cluster() {
-    if pvecm status &>/dev/null; then
-        log_warning "Dieser Server ist bereits in einem Cluster!"
-        pvecm status
-        read -p "Trotzdem fortfahren? (j/n): " response
-        if [[ ! $response =~ ^[jJ]$ ]]; then
-            log_info "Abgebrochen."
-            exit 0
-        fi
-    fi
-}
+```bash
+sudo ./proxclusterbridge.sh
+# Wähle Option 1 (Vollständiges Setup)
+# Wähle "n" für Worker-Node
+# Gib Master-Informationen ein
+```
 
-check_network_connectivity() {
-    log_step "Prüfe Netzwerk-Konnektivität..."
-    
-    if ! ping -c 2 8.8.8.8 &>/dev/null; then
-        log_error "Keine Internet-Verbindung!"
-        exit 1
-    fi
-    log_success "Internet-Verbindung OK"
-}
+### 4. Master aktualisieren
 
-check_disk_space() {
-    local available=$(df / | awk 'NR==2 {print $4}')
-    if [ "$available" -lt 1048576 ]; then  # < 1GB
-        log_warning "Weniger als 1GB freier Speicherplatz!"
-        read -p "Trotzdem fortfahren? (j/n): " response
-        if [[ ! $response =~ ^[jJ]$ ]]; then
-            exit 0
-        fi
-    fi
-}
+Füge auf dem **Master** in `/etc/wireguard/wg0.conf` hinzu:
 
-pre_flight_checks() {
-    log_step "Führe Sicherheitsprüfungen durch..."
-    echo ""
-    
-    check_root
-    check_proxmox
-    check_existing_cluster
-    check_network_connectivity
-    check_disk_space
-    
-    echo ""
-    log_success "Alle Prüfungen bestanden!"
-    echo ""
-}
+```ini
+[Peer]
+PublicKey = <WORKER_PUBLIC_KEY>
+AllowedIPs = <WORKER_WG_IP>/32
+```
 
-# WireGuard Installation
-install_wireguard() {
-    log_step "Installiere WireGuard..."
-    
-    read -p "WireGuard installieren? (j/n): " response
-    if [[ ! $response =~ ^[jJ]$ ]]; then
-        log_info "Übersprungen"
-        return
-    fi
-    
-    apt update -qq
-    apt install -y wireguard wireguard-tools qrencode
-    
-    log_success "WireGuard installiert"
-}
+Dann WireGuard neu starten:
 
-generate_wireguard_keys() {
-    log_step "Generiere WireGuard Keys..."
-    
-    if [ -f "/etc/wireguard/privatekey" ]; then
-        log_warning "Keys existieren bereits!"
-        read -p "Neue Keys generieren? (j/n): " response
-        if [[ ! $response =~ ^[jJ]$ ]]; then
-            return
-        fi
-        backup_directory "/etc/wireguard"
-    fi
-    
-    mkdir -p /etc/wireguard
-    
-    WG_PRIVATE_KEY=$(wg genkey)
-    WG_PUBLIC_KEY=$(echo "$WG_PRIVATE_KEY" | wg pubkey)
-    
-    echo "$WG_PRIVATE_KEY" > /etc/wireguard/privatekey
-    echo "$WG_PUBLIC_KEY" > /etc/wireguard/publickey
-    chmod 600 /etc/wireguard/privatekey
-    chmod 644 /etc/wireguard/publickey
-    
-    log_success "Keys generiert!"
-    echo ""
-    echo "═══════════════════════════════════════════"
-    echo "Public Key (für anderen Server):"
-    echo "$WG_PUBLIC_KEY"
-    echo "═══════════════════════════════════════════"
-    echo ""
-}
+```bash
+systemctl restart wg-quick@wg0
+```
 
-# Node-Konfiguration
-configure_node() {
-    clear
-    echo "════════════════════════════════════════════════"
-    echo "  ProxClusterBridge - Node Konfiguration"
-    echo "════════════════════════════════════════════════"
-    echo ""
-    
-    pre_flight_checks
-    create_full_backup
-    
-    read -p "Ist dies der ERSTE Server (Master)? (j/n): " IS_MASTER
-    
-    if [[ $IS_MASTER =~ ^[jJ]$ ]]; then
-        setup_master_node
-    else
-        setup_worker_node
-    fi
-}
+### 5. Worker dem Cluster hinzufügen
 
-setup_master_node() {
-    log_step "Konfiguriere Master-Node..."
-    echo ""
-    
-    # Informationen sammeln
-    CURRENT_HOSTNAME=$(hostname)
-    read -p "Neuer Hostname [$CURRENT_HOSTNAME]: " HOSTNAME
-    HOSTNAME=${HOSTNAME:-$CURRENT_HOSTNAME}
-    
-    read -p "WireGuard IP für diesen Server (z.B. 10.99.0.1): " WG_IP
-    read -p "Öffentliche IP dieses Servers: " PUBLIC_IP
-    read -p "WireGuard Port [51820]: " WG_PORT
-    WG_PORT=${WG_PORT:-51820}
-    
-    echo ""
-    log_warning "Folgende Änderungen werden vorgenommen:"
-    echo "  - Hostname: $CURRENT_HOSTNAME → $HOSTNAME"
-    echo "  - WireGuard IP: $WG_IP"
-    echo "  - WireGuard Port: $WG_PORT"
-    echo "  - IP Forwarding wird aktiviert"
-    echo ""
-    
-    read -p "Fortfahren? (j/n): " confirm
-    if [[ ! $confirm =~ ^[jJ]$ ]]; then
-        log_info "Abgebrochen"
-        exit 0
-    fi
-    
-    # Hostname setzen
-    backup_file "/etc/hostname"
-    backup_file "/etc/hosts"
-    hostnamectl set-hostname "$HOSTNAME"
-    log_success "Hostname gesetzt: $HOSTNAME"
-    
-    # Erkenne physisches Interface
-    log_step "Erkenne Netzwerk-Interface..."
-    PHYSICAL_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
-    
-    if [ -z "$PHYSICAL_IF" ]; then
-        log_warning "Konnte Standard-Interface nicht automatisch erkennen"
-        read -p "Gib das physische Interface ein (z.B. enp5s0, vmbr0): " PHYSICAL_IF
-    else
-        log_info "Erkanntes Interface: $PHYSICAL_IF"
-        read -p "Ist das korrekt? (j/n, oder anderes Interface eingeben): " if_confirm
-        if [[ ! $if_confirm =~ ^[jJ]$ ]]; then
-            PHYSICAL_IF=$if_confirm
-        fi
-    fi
-    
-    # Validiere WireGuard IP
-    if [ -z "$WG_IP" ]; then
-        log_error "WireGuard IP ist leer! Bitte erneut eingeben."
-        read -p "WireGuard IP für diesen Server (z.B. 10.99.0.1): " WG_IP
-    fi
-    
-    log_info "Verwende WireGuard IP: $WG_IP"
-    log_info "Verwende Interface: $PHYSICAL_IF"
-    
-    # WireGuard Config erstellen
-    log_step "Erstelle WireGuard Konfiguration..."
-    
-    cat > /etc/wireguard/wg0.conf <<EOF
+Auf dem **Worker** fortsetzten und dem Cluster beitreten.
+
+---
+
+## 📖 Detaillierte Anleitung
+
+### Netzwerk-Architektur
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                                                               │
+│  Master (Hetzner)              Worker (Home)                 │
+│  ┌─────────────────┐          ┌─────────────────┐           │
+│  │ Public IP       │          │ Private IP      │           │
+│  │ 46.4.25.44      │          │ 192.168.1.100   │           │
+│  │                 │          │                 │           │
+│  │ vmbr0 (Bridges) │          │ vmbr0 (Bridges) │           │
+│  │ vmbr1, vmbr2... │          │ vmbr1, vmbr2... │           │
+│  │                 │          │                 │           │
+│  │ wg0: 10.99.0.1  │◄────────►│ wg0: 10.99.0.2  │           │
+│  └─────────────────┘ WireGuard └─────────────────┘           │
+│         │                              │                     │
+│         │                              │                     │
+│         └──────────────────────────────┘                     │
+│              Proxmox Cluster                                 │
+│         (Corosync über WireGuard)                            │
+│                                                               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Was wird geändert?
+
+#### ✅ Wird hinzugefügt:
+- Neues Interface: `wg0` (WireGuard VPN)
+- WireGuard-Konfiguration: `/etc/wireguard/wg0.conf`
+- iptables-Regeln für NAT (temporär, nur während WireGuard läuft)
+- IP Forwarding in `/etc/sysctl.conf` (falls nicht schon aktiv)
+
+#### ❌ Wird NICHT geändert:
+- `/etc/network/interfaces` - Deine Bridge-Konfiguration bleibt unberührt
+- Bestehende VMs und Container
+- Firewall-Regeln (außer WireGuard-Port)
+- Storage-Konfiguration
+- Proxmox-Einstellungen
+
+### Menü-Optionen
+
+```
+1) Vollständiges Setup (Empfohlen)
+   → Installation + Konfiguration + Cluster-Setup
+   
+2) Nur WireGuard installieren
+   → apt install wireguard
+   
+3) Nur WireGuard Keys generieren
+   → Erstellt Public/Private Keys
+   
+4) Verbindung testen
+   → Ping-Test zum anderen Node
+   
+5) System-Status anzeigen
+   → Zeigt WireGuard + Cluster Status
+   
+6) WireGuard neu starten
+   → systemctl restart wg-quick@wg0
+   
+7) Backup erstellen (manuell)
+   → Erstellt Sicherheitskopie ohne Änderungen
+   
+8) Rollback durchführen
+   → Stellt vorheriges Backup wieder her
+```
+
+---
+
+## 🔧 Manuelle Konfiguration
+
+### WireGuard manuell testen
+
+```bash
+# Status prüfen
+wg show
+
+# Logs anschauen
+journalctl -u wg-quick@wg0 -f
+
+# Verbindung testen
+ping 10.99.0.1  # Master
+ping 10.99.0.2  # Worker
+```
+
+### Cluster-Status prüfen
+
+```bash
+# Cluster-Status
+pvecm status
+
+# Alle Nodes anzeigen
+pvecm nodes
+
+# Quorum-Status
+pvecm expected 2
+```
+
+---
+
+## 🛠️ Troubleshooting
+
+### Problem: Keine Verbindung zwischen Nodes
+
+**Lösung:**
+
+```bash
+# 1. WireGuard Status prüfen
+systemctl status wg-quick@wg0
+wg show
+
+# 2. Firewall prüfen
+iptables -L -n -v | grep 51820
+
+# 3. Routing prüfen
+ip route
+
+# 4. Logs checken
+journalctl -u wg-quick@wg0 --no-pager -n 50
+```
+
+### Problem: Cluster-Join schlägt fehl
+
+**Mögliche Ursachen:**
+
+1. **WireGuard-Verbindung nicht aktiv**
+   ```bash
+   ping 10.99.0.1  # Von Worker zum Master
+   ```
+
+2. **SSH funktioniert nicht**
+   ```bash
+   ssh root@10.99.0.1  # Teste SSH-Verbindung
+   ```
+
+3. **Falsches Passwort**
+   - `pvecm add` benötigt Root-Passwort des Masters
+
+4. **Ports nicht offen**
+   - TCP 22 (SSH)
+   - TCP 8006 (Proxmox Web)
+   - UDP 5404-5405 (Corosync)
+
+### Problem: WireGuard startet nicht
+
+```bash
+# Konfiguration testen
+wg-quick up wg0
+
+# Fehler in Config?
+cat /etc/wireguard/wg0.conf
+
+# Interface-Konflikt?
+ip link show wg0
+```
+
+---
+
+## 🔙 Rollback
+
+Falls etwas schiefgeht:
+
+```bash
+# Option 8 im Menü wählen
+sudo ./proxclusterbridge.sh
+# → 8) Rollback durchführen
+
+# Oder manuell:
+# 1. WireGuard stoppen
+systemctl stop wg-quick@wg0
+systemctl disable wg-quick@wg0
+
+# 2. Backup wiederherstellen
+BACKUP_DIR="/root/proxclusterbridge-backup-YYYYMMDD-HHMMSS"
+cp $BACKUP_DIR/interfaces.backup /etc/network/interfaces
+cp $BACKUP_DIR/hostname.backup /etc/hostname
+hostnamectl set-hostname $(cat $BACKUP_DIR/hostname.backup)
+
+# 3. System neu starten
+reboot
+```
+
+---
+
+## 📊 Backup-Struktur
+
+Das Script erstellt automatisch Backups in:
+
+```
+/root/proxclusterbridge-backup-20250109-143022/
+├── hostname.backup           # Alter Hostname
+├── interfaces.backup         # /etc/network/interfaces
+├── hosts.backup             # /etc/hosts
+├── sysctl.backup            # Sysctl-Einstellungen
+├── services.backup          # Aktive Services
+├── pve.tar.gz              # /etc/pve Konfiguration
+├── wireguard.tar.gz        # /etc/wireguard (falls vorhanden)
+└── rollback.log            # Rollback-Informationen
+```
+
+---
+
+## ⚙️ Konfigurationsdateien
+
+### Master: `/etc/wireguard/wg0.conf`
+
+```ini
 [Interface]
-PrivateKey = $(cat /etc/wireguard/privatekey)
-Address = ${WG_IP}/24
-ListenPort = $WG_PORT
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $PHYSICAL_IF -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $PHYSICAL_IF -j MASQUERADE
-
-# Worker-Nodes werden hier hinzugefügt:
-# Beispiel:
-# [Peer]
-# PublicKey = WORKER_PUBLIC_KEY
-# AllowedIPs = 10.99.0.2/32
-EOF
-
-    chmod 600 /etc/wireguard/wg0.conf
-    log_success "WireGuard Config erstellt"
-    
-    # Firewall konfigurieren
-    log_step "Konfiguriere Firewall..."
-    
-    if command -v ufw &> /dev/null; then
-        ufw allow "$WG_PORT"/udp comment "WireGuard ProxClusterBridge"
-        log_success "UFW Regel hinzugefügt"
-    fi
-    
-    # IP Forwarding prüfen und aktivieren
-    log_step "Prüfe IP Forwarding..."
-    
-    IPV4_FORWARD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
-    
-    if [ "$IPV4_FORWARD" = "1" ]; then
-        log_success "IP Forwarding bereits aktiviert - keine Änderung nötig"
-    else
-        log_info "IP Forwarding wird aktiviert..."
-        backup_file "/etc/sysctl.conf"
-        
-        if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf; then
-            echo "" >> /etc/sysctl.conf
-            echo "# Added by ProxClusterBridge" >> /etc/sysctl.conf
-            echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-            log_info "Zeile zu /etc/sysctl.conf hinzugefügt"
-        fi
-        
-        sysctl -w net.ipv4.ip_forward=1 > /dev/null
-        log_success "IP Forwarding aktiviert"
-    fi
-    
-    # WireGuard starten
-    log_step "Starte WireGuard..."
-    systemctl enable wg-quick@wg0
-    systemctl start wg-quick@wg0
-    
-    if systemctl is-active --quiet wg-quick@wg0; then
-        log_success "WireGuard läuft"
-    else
-        log_error "WireGuard konnte nicht gestartet werden!"
-        log_info "Prüfe: journalctl -u wg-quick@wg0"
-        exit 1
-    fi
-    
-    # Proxmox Cluster erstellen
-    log_step "Erstelle Proxmox Cluster..."
-    read -p "Cluster Name: " CLUSTER_NAME
-    
-    read -p "Cluster jetzt erstellen? (j/n): " confirm
-    if [[ $confirm =~ ^[jJ]$ ]]; then
-        pvecm create "$CLUSTER_NAME" --bindnet0_addr="$WG_IP"
-        log_success "Cluster '$CLUSTER_NAME' erstellt!"
-    else
-        log_info "Cluster-Erstellung übersprungen"
-        log_warning "Manuell erstellen mit: pvecm create $CLUSTER_NAME --bindnet0_addr=$WG_IP"
-    fi
-    
-    # Zusammenfassung
-    echo ""
-    echo "════════════════════════════════════════════════"
-    echo "  Master-Node erfolgreich konfiguriert!"
-    echo "════════════════════════════════════════════════"
-    echo ""
-    echo "📋 Informationen für Worker-Node:"
-    echo "─────────────────────────────────────────────"
-    echo "Master Public Key:"
-    echo "$(cat /etc/wireguard/publickey)"
-    echo ""
-    echo "Master WireGuard IP: $WG_IP"
-    echo "Master Public IP: $PUBLIC_IP"
-    echo "WireGuard Port: $WG_PORT"
-    echo ""
-    echo "🔧 Nächste Schritte:"
-    echo "─────────────────────────────────────────────"
-    echo "1. Speichere die obigen Informationen"
-    echo "2. Führe dieses Script auf dem Worker-Server aus"
-    echo "3. Nach Worker-Setup, füge auf diesem Server hinzu:"
-    echo ""
-    echo "   # In /etc/wireguard/wg0.conf:"
-    echo "   [Peer]"
-    echo "   PublicKey = <WORKER_PUBLIC_KEY>"
-    echo "   AllowedIPs = <WORKER_WG_IP>/32"
-    echo ""
-    echo "   # Dann:"
-    echo "   systemctl restart wg-quick@wg0"
-    echo ""
-    echo "💾 Backup gespeichert in:"
-    echo "   $BACKUP_DIR"
-    echo "════════════════════════════════════════════════"
-    echo ""
-}
-
-setup_worker_node() {
-    log_step "Konfiguriere Worker-Node..."
-    echo ""
-    
-    # Informationen sammeln
-    CURRENT_HOSTNAME=$(hostname)
-    read -p "Neuer Hostname [$CURRENT_HOSTNAME]: " HOSTNAME
-    HOSTNAME=${HOSTNAME:-$CURRENT_HOSTNAME}
-    
-    read -p "WireGuard IP für diesen Server (z.B. 10.99.0.2): " WG_IP
-    
-    echo ""
-    echo "Informationen vom Master-Server benötigt:"
-    read -p "Public Key des Masters: " MASTER_PUBLIC_KEY
-    read -p "WireGuard IP des Masters (z.B. 10.99.0.1): " MASTER_WG_IP
-    read -p "Öffentliche IP des Masters: " MASTER_PUBLIC_IP
-    read -p "WireGuard Port des Masters [51820]: " MASTER_WG_PORT
-    MASTER_WG_PORT=${MASTER_WG_PORT:-51820}
-    
-    echo ""
-    log_warning "Folgende Änderungen werden vorgenommen:"
-    echo "  - Hostname: $CURRENT_HOSTNAME → $HOSTNAME"
-    echo "  - WireGuard IP: $WG_IP"
-    echo "  - Verbindung zu Master: $MASTER_PUBLIC_IP:$MASTER_WG_PORT"
-    echo ""
-    
-    read -p "Fortfahren? (j/n): " confirm
-    if [[ ! $confirm =~ ^[jJ]$ ]]; then
-        log_info "Abgebrochen"
-        exit 0
-    fi
-    
-    # Hostname setzen
-    backup_file "/etc/hostname"
-    backup_file "/etc/hosts"
-    hostnamectl set-hostname "$HOSTNAME"
-    log_success "Hostname gesetzt: $HOSTNAME"
-    
-    # Erkenne physisches Interface
-    log_step "Erkenne Netzwerk-Interface..."
-    PHYSICAL_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
-    
-    if [ -z "$PHYSICAL_IF" ]; then
-        log_warning "Konnte Standard-Interface nicht automatisch erkennen"
-        read -p "Gib das physische Interface ein (z.B. enp5s0, vmbr0): " PHYSICAL_IF
-    else
-        log_info "Erkanntes Interface: $PHYSICAL_IF"
-        read -p "Ist das korrekt? (j/n, oder anderes Interface eingeben): " if_confirm
-        if [[ ! $if_confirm =~ ^[jJ]$ ]]; then
-            PHYSICAL_IF=$if_confirm
-        fi
-    fi
-    
-    # Validiere WireGuard IP
-    if [ -z "$WG_IP" ]; then
-        log_error "WireGuard IP ist leer! Bitte erneut eingeben."
-        read -p "WireGuard IP für diesen Server (z.B. 10.99.0.2): " WG_IP
-    fi
-    
-    log_info "Verwende WireGuard IP: $WG_IP"
-    log_info "Verwende Interface: $PHYSICAL_IF"
-    
-    # WireGuard Config erstellen
-    log_step "Erstelle WireGuard Konfiguration..."
-    
-    cat > /etc/wireguard/wg0.conf <<EOF
-[Interface]
-PrivateKey = $(cat /etc/wireguard/privatekey)
-Address = ${WG_IP}/24
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o $PHYSICAL_IF -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o $PHYSICAL_IF -j MASQUERADE
+PrivateKey = <MASTER_PRIVATE_KEY>
+Address = 10.99.0.1/24
+ListenPort = 51820
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o vmbr0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o vmbr0 -j MASQUERADE
 
 [Peer]
-PublicKey = $MASTER_PUBLIC_KEY
-Endpoint = $MASTER_PUBLIC_IP:$MASTER_WG_PORT
-AllowedIPs = $MASTER_WG_IP/32, 10.99.0.0/24
+PublicKey = <WORKER_PUBLIC_KEY>
+AllowedIPs = 10.99.0.2/32
+```
+
+### Worker: `/etc/wireguard/wg0.conf`
+
+```ini
+[Interface]
+PrivateKey = <WORKER_PRIVATE_KEY>
+Address = 10.99.0.2/24
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o vmbr0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o vmbr0 -j MASQUERADE
+
+[Peer]
+PublicKey = <MASTER_PUBLIC_KEY>
+Endpoint = <MASTER_PUBLIC_IP>:51820
+AllowedIPs = 10.99.0.1/32, 10.99.0.0/24
 PersistentKeepalive = 25
-EOF
+```
 
-    chmod 600 /etc/wireguard/wg0.conf
-    log_success "WireGuard Config erstellt"
-    
-    # IP Forwarding prüfen und aktivieren
-    log_step "Prüfe IP Forwarding..."
-    
-    IPV4_FORWARD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
-    
-    if [ "$IPV4_FORWARD" = "1" ]; then
-        log_success "IP Forwarding bereits aktiviert - keine Änderung nötig"
-    else
-        log_info "IP Forwarding wird aktiviert..."
-        backup_file "/etc/sysctl.conf"
-        
-        if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf; then
-            echo "" >> /etc/sysctl.conf
-            echo "# Added by ProxClusterBridge" >> /etc/sysctl.conf
-            echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-            log_info "Zeile zu /etc/sysctl.conf hinzugefügt"
-        fi
-        
-        sysctl -w net.ipv4.ip_forward=1 > /dev/null
-        log_success "IP Forwarding aktiviert"
-    fi
-    
-    # WireGuard starten
-    log_step "Starte WireGuard..."
-    systemctl enable wg-quick@wg0
-    systemctl start wg-quick@wg0
-    
-    if systemctl is-active --quiet wg-quick@wg0; then
-        log_success "WireGuard läuft"
-    else
-        log_error "WireGuard konnte nicht gestartet werden!"
-        exit 1
-    fi
-    
-    # Verbindung testen
-    log_step "Teste Verbindung zum Master..."
-    sleep 3
-    
-    if ping -c 4 -W 2 "$MASTER_WG_IP" &>/dev/null; then
-        log_success "Verbindung zum Master erfolgreich!"
-    else
-        log_error "Keine Verbindung zum Master!"
-        log_warning "Mögliche Ursachen:"
-        echo "  1. Master-Server hat Worker noch nicht in Config eingetragen"
-        echo "  2. Firewall blockiert Verbindung"
-        echo "  3. WireGuard läuft nicht auf Master"
-        echo ""
-        read -p "Trotzdem fortfahren? (j/n): " response
-        if [[ ! $response =~ ^[jJ]$ ]]; then
-            exit 1
-        fi
-    fi
-    
-    # Zusammenfassung für Master
-    echo ""
-    echo "════════════════════════════════════════════════"
-    echo "  Worker-Node Konfiguration abgeschlossen!"
-    echo "════════════════════════════════════════════════"
-    echo ""
-    echo "📋 Diese Informationen auf dem MASTER eintragen:"
-    echo "─────────────────────────────────────────────"
-    echo ""
-    echo "Worker Public Key:"
-    echo "$(cat /etc/wireguard/publickey)"
-    echo ""
-    echo "In /etc/wireguard/wg0.conf auf dem Master:"
-    echo ""
-    echo "[Peer]"
-    echo "PublicKey = $(cat /etc/wireguard/publickey)"
-    echo "AllowedIPs = $WG_IP/32"
-    echo ""
-    echo "Dann auf dem Master:"
-    echo "systemctl restart wg-quick@wg0"
-    echo ""
-    echo "════════════════════════════════════════════════"
-    echo ""
-    
-    read -p "Wurde die Konfiguration auf dem Master eingetragen? (j/n): " master_ready
-    
-    if [[ ! $master_ready =~ ^[jJ]$ ]]; then
-        log_warning "Bitte erst Master konfigurieren, dann fortfahren"
-        exit 0
-    fi
-    
-    # Erneut Verbindung testen
-    log_step "Teste Verbindung erneut..."
-    if ping -c 4 "$MASTER_WG_IP" &>/dev/null; then
-        log_success "Verbindung OK!"
-    else
-        log_error "Immer noch keine Verbindung!"
-        exit 1
-    fi
-    
-    # Cluster beitreten
-    log_step "Trete dem Cluster bei..."
-    log_warning "Root-Passwort des Masters wird benötigt!"
-    echo ""
-    
-    read -p "Jetzt dem Cluster beitreten? (j/n): " confirm
-    if [[ $confirm =~ ^[jJ]$ ]]; then
-        if pvecm add "$MASTER_WG_IP" --use_ssh; then
-            log_success "Erfolgreich dem Cluster beigetreten!"
-        else
-            log_error "Cluster-Beitritt fehlgeschlagen!"
-            log_info "Versuche es manuell: pvecm add $MASTER_WG_IP --use_ssh"
-        fi
-    else
-        log_info "Cluster-Beitritt übersprungen"
-        log_warning "Manuell beitreten mit: pvecm add $MASTER_WG_IP --use_ssh"
-    fi
-    
-    echo ""
-    echo "════════════════════════════════════════════════"
-    echo "  Setup abgeschlossen!"
-    echo "════════════════════════════════════════════════"
-    echo ""
-    echo "💾 Backup gespeichert in:"
-    echo "   $BACKUP_DIR"
-    echo ""
-}
+---
 
-# Test-Funktionen
-test_connectivity() {
-    log_step "Teste Netzwerk-Verbindung..."
-    echo ""
-    
-    read -p "IP des anderen Nodes: " TEST_IP
-    
-    echo ""
-    log_info "Führe Ping-Test durch..."
-    
-    if ping -c 4 "$TEST_IP"; then
-        echo ""
-        log_success "Verbindung erfolgreich!"
-    else
-        echo ""
-        log_error "Verbindung fehlgeschlagen!"
-        echo ""
-        log_info "Debugging-Schritte:"
-        echo "  1. WireGuard Status: wg show"
-        echo "  2. Routing-Tabelle: ip route"
-        echo "  3. WireGuard Logs: journalctl -u wg-quick@wg0"
-        echo "  4. Firewall: iptables -L -n -v"
-    fi
-}
+## 🔒 Sicherheit
 
-show_status() {
-    clear
-    echo "════════════════════════════════════════════════"
-    echo "  ProxClusterBridge - System Status"
-    echo "════════════════════════════════════════════════"
-    echo ""
-    
-    echo "📡 WireGuard Status:"
-    echo "────────────────────────────────────────────────"
-    if systemctl is-active --quiet wg-quick@wg0; then
-        log_success "WireGuard läuft"
-        wg show
-    else
-        log_error "WireGuard läuft nicht!"
-    fi
-    
-    echo ""
-    echo "🔧 Proxmox Cluster Status:"
-    echo "────────────────────────────────────────────────"
-    if pvecm status &>/dev/null; then
-        pvecm status
-        echo ""
-        echo "Cluster Nodes:"
-        pvecm nodes
-    else
-        log_warning "Nicht in einem Cluster"
-    fi
-    
-    echo ""
-    echo "🌐 Netzwerk Interfaces:"
-    echo "────────────────────────────────────────────────"
-    ip -4 addr show | grep -E 'inet|^[0-9]'
-    
-    echo ""
-    echo "════════════════════════════════════════════════"
-}
+### Best Practices
 
-# Haupt-Menü
-main_menu() {
-    while true; do
-        clear
-        echo "════════════════════════════════════════════════"
-        echo "  ProxClusterBridge v1.0 - Safe Mode"
-        echo "════════════════════════════════════════════════"
-        echo ""
-        echo "  🚀 Setup & Installation:"
-        echo "  1) Vollständiges Setup (Empfohlen)"
-        echo "  2) Nur WireGuard installieren"
-        echo "  3) Nur WireGuard Keys generieren"
-        echo ""
-        echo "  🔧 Wartung & Tools:"
-        echo "  4) Verbindung testen"
-        echo "  5) System-Status anzeigen"
-        echo "  6) WireGuard neu starten"
-        echo ""
-        echo "  ⚠️  Notfall & Rollback:"
-        echo "  7) Backup erstellen (manuell)"
-        echo "  8) Rollback durchführen"
-        echo ""
-        echo "  9) Beenden"
-        echo ""
-        echo "════════════════════════════════════════════════"
-        echo ""
-        read -p "Wähle eine Option [1-9]: " choice
-        
-        case $choice in
-            1)
-                check_root
-                install_wireguard
-                generate_wireguard_keys
-                configure_node
-                echo ""
-                read -p "Drücke Enter zum Fortfahren..."
-                ;;
-            2)
-                check_root
-                check_proxmox
-                install_wireguard
-                log_success "WireGuard installiert"
-                read -p "Drücke Enter zum Fortfahren..."
-                ;;
-            3)
-                check_root
-                generate_wireguard_keys
-                read -p "Drücke Enter zum Fortfahren..."
-                ;;
-            4)
-                test_connectivity
-                read -p "Drücke Enter zum Fortfahren..."
-                ;;
-            5)
-                show_status
-                read -p "Drücke Enter zum Fortfahren..."
-                ;;
-            6)
-                check_root
-                log_step "Starte WireGuard neu..."
-                systemctl restart wg-quick@wg0
-                if systemctl is-active --quiet wg-quick@wg0; then
-                    log_success "WireGuard neugestartet"
-                    wg show
-                else
-                    log_error "Fehler beim Neustart!"
-                fi
-                read -p "Drücke Enter zum Fortfahren..."
-                ;;
-            7)
-                check_root
-                create_full_backup
-                read -p "Drücke Enter zum Fortfahren..."
-                ;;
-            8)
-                check_root
-                perform_rollback
-                read -p "Drücke Enter zum Fortfahren..."
-                ;;
-            9)
-                echo ""
-                log_info "Auf Wiedersehen! 👋"
-                echo ""
-                exit 0
-                ;;
-            *)
-                log_error "Ungültige Option"
-                sleep 1
-                ;;
-        esac
-    done
-}
+1. **Firewall-Regeln**
+   ```bash
+   # Nur WireGuard-Port von außen erreichbar
+   ufw allow 51820/udp
+   
+   # Proxmox nur über WireGuard
+   ufw allow from 10.99.0.0/24 to any port 8006
+   ```
 
-# Zeige Banner
-clear
-echo "════════════════════════════════════════════════"
-echo "  ProxClusterBridge v1.0"
-echo "  Safe Multi-Site Proxmox Cluster Setup"
-echo "════════════════════════════════════════════════"
-echo ""
-echo "  🔒 Safe Mode aktiviert:"
-echo "     ✓ Automatische Backups"
-echo "     ✓ Rollback-Funktion"
-echo "     ✓ Bestätigungen bei kritischen Schritten"
-echo ""
-echo "════════════════════════════════════════════════"
-sleep 2
+2. **SSH-Zugriff absichern**
+   ```bash
+   # Nur Key-basierte Auth
+   # In /etc/ssh/sshd_config:
+   PasswordAuthentication no
+   ```
 
-# Script starten
-main_menu
+3. **Regelmäßige Updates**
+   ```bash
+   apt update && apt upgrade -y
+   ```
+
+4. **Monitoring**
+   ```bash
+   # WireGuard-Traffic überwachen
+   watch -n 1 wg show
+   ```
+
+---
+
+## 📝 FAQ
+
+**Q: Kann ich mehr als 2 Server verbinden?**
+A: Ja! Füge einfach weitere Peer-Sections in der WireGuard-Config hinzu.
+
+**Q: Funktioniert das auch mit Proxmox 7.x?**
+A: Ja, getestet mit Proxmox 7.4 und 8.x.
+
+**Q: Was passiert wenn die WireGuard-Verbindung abbricht?**
+A: Der Cluster wird als "quorum lost" markiert. VMs laufen weiter, aber keine Cluster-Operationen möglich.
+
+**Q: Kann ich bestehende Cluster erweitern?**
+A: Vorsicht! Backup erstellen und testen. Besser: Neues Cluster mit Migration.
+
+**Q: Werden meine VMs unterbrochen?**
+A: Nein, VMs laufen während des gesamten Setups weiter.
+
+**Q: Kann ich IPv6 nutzen?**
+A: Ja, WireGuard unterstützt IPv6. Passe die Config entsprechend an.
+
+---
+
+## 🤝 Contributing
+
+Dieses Tool ist Teil des [Proxmox Toolkit](https://github.com/Stumpf-works/proxmox-toolkit) Repository.
+
+Bugs oder Feature-Requests? → [Issue erstellen](https://github.com/Stumpf-works/proxmox-toolkit/issues)
+
+---
+
+## 📜 Lizenz
+
+MIT License - siehe [LICENSE](../LICENSE) Datei im Hauptverzeichnis.
+
+---
+
+## 👨‍💻 Autor
+
+**Sebastian Stumpf**
+- GitHub: [@Stumpf-works](https://github.com/Stumpf-works)
+- Website: [Stumpf.works](https://stumpf.works)
+
+---
+
+## ⚠️ Haftungsausschluss
+
+Dieses Tool wird "as is" bereitgestellt. Teste es immer erst in einer Test-Umgebung!
+Erstelle IMMER Backups vor produktiven Änderungen.
+
+---
+
+## 🙏 Credits
+
+- [WireGuard](https://www.wireguard.com/) - Moderne VPN-Technologie
+- [Proxmox VE](https://www.proxmox.com/) - Virtualisierungsplattform
+- Community-Feedback und Testing
+
+---
+
+**⭐ Wenn dir dieses Tool hilft, lass einen Star im [Proxmox Toolkit](https://github.com/Stumpf-works/proxmox-toolkit) da!**
